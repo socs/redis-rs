@@ -256,30 +256,32 @@ impl ClusterConnection {
         for conn in samples.iter_mut() {
             let value = conn.req_command(&slot_cmd())?;
             if let Ok(mut slots_data) = parse_slots(value, self.tls) {
-                slots_data.sort_by_key(|s| s.start());
-                let last_slot = slots_data.iter().try_fold(0, |prev_end, slot_data| {
-                    if prev_end != slot_data.start() {
-                        return Err(RedisError::from((
-                            ErrorKind::ResponseError,
-                            "Slot refresh error.",
-                            format!(
-                                "Received overlapping slots {} and {}..{}",
-                                prev_end,
-                                slot_data.start(),
-                                slot_data.end()
-                            ),
-                        )));
-                    }
-                    Ok(slot_data.end() + 1)
-                })?;
-
-                if last_slot != SLOT_SIZE {
+                if slots_data.is_empty() {
                     return Err(RedisError::from((
                         ErrorKind::ResponseError,
                         "Slot refresh error.",
-                        format!("Lacks the slots >= {last_slot}"),
+                        "No slots allocated",
                     )));
                 }
+                slots_data.sort_by_key(|s| s.start());
+                let first_slot = slots_data[0].start();
+                let last_slot = slots_data
+                    .iter()
+                    .try_fold(first_slot, |prev_end, slot_data| {
+                        if prev_end > slot_data.start() {
+                            return Err(RedisError::from((
+                                ErrorKind::ResponseError,
+                                "Slot refresh error.",
+                                format!(
+                                    "Received overlapping slots {} and {}..{}",
+                                    prev_end,
+                                    slot_data.start(),
+                                    slot_data.end()
+                                ),
+                            )));
+                        }
+                        Ok(slot_data.end() + 1)
+                    })?;
 
                 new_slots = Some(
                     slots_data

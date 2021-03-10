@@ -247,9 +247,20 @@ impl ClusterConnection {
 
         for mut conn in samples.iter_mut() {
             if let Ok(mut slots_data) = get_slots(&mut conn) {
+
+                if slots_data.is_empty() {
+                    return Err(RedisError::from((
+                        ErrorKind::ClusterDown,
+                        "Slot refresh error.",
+                        "No slots allocated".into()
+                    )));
+                }
+
                 slots_data.sort_by_key(|s| s.start());
-                let last_slot = slots_data.iter().try_fold(0, |prev_end, slot_data| {
-                    if prev_end != slot_data.start() {
+
+                let first_slot = slots_data[0].start();
+                let _last_slot = slots_data.iter().try_fold(first_slot, |prev_end, slot_data| {
+                    if prev_end > slot_data.start() {
                         return Err(RedisError::from((
                             ErrorKind::ResponseError,
                             "Slot refresh error.",
@@ -264,6 +275,7 @@ impl ClusterConnection {
                     Ok(slot_data.end() + 1)
                 })?;
 
+                /*
                 if usize::from(last_slot) != SLOT_SIZE {
                     return Err(RedisError::from((
                         ErrorKind::ResponseError,
@@ -271,6 +283,7 @@ impl ClusterConnection {
                         format!("Lacks the slots >= {}", last_slot),
                     )));
                 }
+                */
 
                 new_slots = Some(
                     slots_data

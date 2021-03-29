@@ -201,7 +201,7 @@ pub fn try_link_local(url : &str) -> Option<(String, u16)>
             if let Some((host, port)) = urlinfo_zid(&url, scheme.len()) {
                 let htrim = host.trim_matches(|c| c == '[' || c == ']');
                 if let (Some(0), Some(_)) = (htrim.find("fe80"), host.find("%")) {
-                    return Some((format!("[{}]", htrim), port));
+                    return Some((format!("{}", htrim), port));
                 }
             }
             break;

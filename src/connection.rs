@@ -150,7 +150,7 @@ where
     }
 }
 
-pub fn ipv6_urlinfo(url : &str, offset : usize)
+pub fn urlinfo_zid(url : &str, offset : usize)
         -> Option<(String, u16)>
 {
     let host_begin = match url.find("@") {
@@ -164,18 +164,19 @@ pub fn ipv6_urlinfo(url : &str, offset : usize)
     } + host_begin - 1;
 
     match (url.chars().nth(host_begin), url.chars().nth(host_end)) {
-        (Some('['), Some(tail)) => {
-            if tail == ']' {
-                let host = &url[host_begin..host_end + 1];
-                let port = DEFAULT_PORT;
-                return Some((host.to_string(), port));
-            }
-            else if let Some(host_close) = url[host_begin..host_end]
-                                            .rfind("]") {
-                let host = &url[host_begin..host_begin + host_close + 1];
-                if let Ok(p) = url[host_begin + host_close + 2..host_end + 1]
-                                .parse::<u16>() {
-                    let port = p;
+        (Some(_), Some(_)) => {
+            if let Some(zid) = url[host_begin..host_end].rfind("%") {
+                let host = &url[host_begin..host_end];
+                if let Some(pdel) = url[host_begin + zid..host_end].rfind(":") {    
+                    if let Ok(p) = url[host_begin + zid + pdel + 1..host_end + 1]
+                                    .parse::<u16>() {
+                        let port = p;
+                        return Some((host.to_string(), port));
+                    }
+                }
+                else {
+                    let host = &url[host_begin..host_end + 1];
+                    let port = DEFAULT_PORT;
                     return Some((host.to_string(), port));
                 }
             }
@@ -194,14 +195,16 @@ pub fn ipv6_urlinfo(url : &str, offset : usize)
 //
 pub fn try_link_local(url : &str) -> Option<(String, u16)>
 {
-    let schemes = vec!["", "rediss://"];
+    let schemes = vec!["redis://" , ""];
     for scheme in schemes {
         if let Some(0) = url.find(scheme) {
-            if let Some((host, port)) = ipv6_urlinfo(&url, scheme.len()) {
-                if let (Some(0), Some(_)) = (host.find("[fe80"), host.find("%")) {
-                    return Some((host, port));
+            if let Some((host, port)) = urlinfo_zid(&url, scheme.len()) {
+                let htrim = host.trim_matches(|c| c == '[' || c == ']');
+                if let (Some(0), Some(_)) = (htrim.find("fe80"), host.find("%")) {
+                    return Some((format!("[{}]", htrim), port));
                 }
             }
+            break;
         }
     }
     None

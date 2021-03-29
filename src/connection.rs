@@ -128,7 +128,10 @@ impl<'a> IntoConnectionInfo for &'a str {
     fn into_connection_info(self) -> RedisResult<ConnectionInfo> {
         match parse_redis_url(self) {
             Ok(u) => u.into_connection_info(),
-            Err(_) => fail!((ErrorKind::InvalidClientConfig, "Redis URL did not parse")),
+            Err(_) => match try_link_local(&self) {
+                Some(ll) => ll.into_connection_info(),
+                None => fail!((ErrorKind::InvalidClientConfig, "Redis URL did not parse"))
+            }
         }
     }
 }
@@ -147,11 +150,71 @@ where
     }
 }
 
+pub fn ipv6_urlinfo(url : &str, offset : usize)
+        -> Option<(String, u16)>
+{
+    let host_begin = match url.find("@") {
+        Some(n) => n + 1,
+        None => offset
+    };
+
+    let host_end = match url[host_begin..].find("/") {
+        Some(n) => n,
+        None => url[host_begin..].len()
+    } + host_begin - 1;
+
+    match (url.chars().nth(host_begin), url.chars().nth(host_end)) {
+        (Some('['), Some(tail)) => {
+            if tail == ']' {
+                let host = &url[host_begin..host_end + 1];
+                let port = DEFAULT_PORT;
+                return Some((host.to_string(), port));
+            }
+            else if let Some(host_close) = url[host_begin..host_end]
+                                            .rfind("]") {
+                let host = &url[host_begin..host_begin + host_close + 1];
+                if let Ok(p) = url[host_begin + host_close + 2..host_end + 1]
+                                .parse::<u16>() {
+                    let port = p;
+                    return Some((host.to_string(), port));
+                }
+            }
+        },
+        (_, _) => {}
+    }
+    
+    None
+}
+
+// Try to parse link local addr from URL, since url::Url::parse() wont handle zone-id
+// only for the redis://, or no, scheme atm
+//
+// TODO: doesnt support URL username:password or db 
+// see impl<T> IntoConnectionInfo for (T, u16)
+//
+pub fn try_link_local(url : &str) -> Option<(String, u16)>
+{
+    let schemes = vec!["", "rediss://"];
+    for scheme in schemes {
+        if let Some(0) = url.find(scheme) {
+            if let Some((host, port)) = ipv6_urlinfo(&url, scheme.len()) {
+                if let (Some(0), Some(_)) = (host.find("[fe80"), host.find("%")) {
+                    return Some((host, port));
+                }
+            }
+        }
+    }
+    None
+}
+
 impl IntoConnectionInfo for String {
     fn into_connection_info(self) -> RedisResult<ConnectionInfo> {
         match parse_redis_url(&self) {
             Ok(u) => u.into_connection_info(),
-            Err(_) => fail!((ErrorKind::InvalidClientConfig, "Redis URL did not parse")),
+            Err(_) => match try_link_local(&self.as_str()) {
+                Some(ll) => ll.into_connection_info(),
+                None => fail!((ErrorKind::InvalidClientConfig, "Redis URL did not parse"))
+            }
         }
     }
 }

@@ -130,7 +130,7 @@ impl<'a> IntoConnectionInfo for &'a str {
             Ok(u) => u.into_connection_info(),
             Err(_) => match try_link_local(&self) {
                 Some(ll) => ll.into_connection_info(),
-                None => fail!((ErrorKind::InvalidClientConfig, "Redis URL did not parse"))
+                None => fail!((ErrorKind::InvalidClientConfig, "Redis URL did not parse: {}", self))
             }
         }
     }
@@ -213,7 +213,7 @@ impl IntoConnectionInfo for String {
             Ok(u) => u.into_connection_info(),
             Err(_) => match try_link_local(&self.as_str()) {
                 Some(ll) => ll.into_connection_info(),
-                None => fail!((ErrorKind::InvalidClientConfig, "Redis URL did not parse"))
+                None => fail!((ErrorKind::InvalidClientConfig, "Redis URL did not parse: {}", self))
             }
         }
     }

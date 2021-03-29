@@ -166,10 +166,10 @@ pub fn urlinfo_zid(url : &str, offset : usize)
     match (url.chars().nth(host_begin), url.chars().nth(host_end)) {
         (Some(_), Some(_)) => {
             if let Some(zid) = url[host_begin..host_end].rfind("%") {
-                let host = &url[host_begin..host_end];
                 if let Some(pdel) = url[host_begin + zid..host_end].rfind(":") {    
                     if let Ok(p) = url[host_begin + zid + pdel + 1..host_end + 1]
                                     .parse::<u16>() {
+                        let host = &url[host_begin..host_begin + zid + pdel];
                         let port = p;
                         return Some((host.to_string(), port));
                     }

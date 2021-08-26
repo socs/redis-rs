@@ -309,8 +309,11 @@ impl ClusterConnection {
             ..Default::default()
         };
         let info = get_connection_info(node, params)?;
+        // Added a hard 10s timeout
+        // TODO: make configurable
+        let timeout = Duration::from_secs(10);
 
-        let mut conn = connect(&info, None)?;
+        let mut conn = connect(&info, Some(timeout))?;
         if self.read_from_replicas {
             // If READONLY is sent to primary nodes, it will have no effect
             cmd("READONLY").query(&mut conn)?;

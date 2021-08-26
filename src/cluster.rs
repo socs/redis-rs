@@ -668,7 +668,12 @@ where
     connection_info.passwd = password;
     let client = super::Client::open(connection_info)?;
 
-    let mut con = client.get_connection()?;
+    //let mut con = client.get_connection()?;
+    // Added a hard 10s timeout
+    // TODO: make configurable
+    let timeout = Duration::from_secs(10);
+    let mut con = client.get_connection_with_timeout(timeout)?;
+    
     if readonly {
         cmd("READONLY").query(&mut con)?;
     }

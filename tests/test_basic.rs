@@ -18,7 +18,7 @@ fn test_parse_redis_url() {
     let redis_url = "redis://127.0.0.1:1234/0".to_string();
     redis::parse_redis_url(&redis_url).unwrap();
     redis::parse_redis_url("unix:/var/run/redis/redis.sock").unwrap();
-    assert!(redis::parse_redis_url("127.0.0.1").is_err());
+    assert!(redis::parse_redis_url("127.0.0.1").is_none());
 }
 
 #[test]
@@ -134,7 +134,7 @@ fn test_set_ops() {
     redis::cmd("SADD").arg("foo").arg(3).execute(&mut con);
 
     let mut s: Vec<i32> = redis::cmd("SMEMBERS").arg("foo").query(&mut con).unwrap();
-    s.sort();
+    s.sort_unstable();
     assert_eq!(s.len(), 3);
     assert_eq!(&s, &[1, 2, 3]);
 
@@ -165,7 +165,7 @@ fn test_scan() {
         .arg(0)
         .query(&mut con)
         .unwrap();
-    s.sort();
+    s.sort_unstable();
     assert_eq!(cur, 0i32);
     assert_eq!(s.len(), 3);
     assert_eq!(&s, &[1, 2, 3]);
@@ -784,8 +784,8 @@ fn test_nice_hash_api() {
     }
 
     assert_eq!(found.len(), 2);
-    assert_eq!(found.contains(&("f3".to_string(), 4)), true);
-    assert_eq!(found.contains(&("f4".to_string(), 8)), true);
+    assert!(found.contains(&("f3".to_string(), 4)));
+    assert!(found.contains(&("f4".to_string(), 8)));
 }
 
 #[test]
@@ -797,13 +797,23 @@ fn test_nice_list_api() {
     assert_eq!(con.rpush("my_list", &[5, 6, 7, 8]), Ok(8));
     assert_eq!(con.llen("my_list"), Ok(8));
 
-    assert_eq!(con.lpop("my_list"), Ok(1));
+    assert_eq!(con.lpop("my_list", Default::default()), Ok(1));
     assert_eq!(con.llen("my_list"), Ok(7));
 
     assert_eq!(con.lrange("my_list", 0, 2), Ok((2, 3, 4)));
 
     assert_eq!(con.lset("my_list", 0, 4), Ok(true));
     assert_eq!(con.lrange("my_list", 0, 2), Ok((4, 3, 4)));
+
+    #[cfg(not(windows))]
+    //Windows version of redis is limited to v3.x
+    {
+        let my_list: Vec<u8> = con.lrange("my_list", 0, 10).expect("To get range");
+        assert_eq!(
+            con.lpop("my_list", core::num::NonZeroUsize::new(10)),
+            Ok(my_list)
+        );
+    }
 }
 
 #[test]
@@ -845,9 +855,9 @@ fn test_redis_server_down() {
 
     let ping = redis::cmd("PING").query::<String>(&mut con);
 
-    assert_eq!(ping.is_err(), true);
+    assert!(ping.is_err());
     eprintln!("{}", ping.unwrap_err());
-    assert_eq!(con.is_open(), false);
+    assert!(!con.is_open());
 }
 
 #[test]
@@ -879,4 +889,52 @@ fn test_zrembylex() {
 
     let remaining: Vec<String> = con.zrange(setname, 0, -1).unwrap();
     assert_eq!(remaining, vec!["apple".to_string(), "grapes".to_string()]);
+}
+
+// Requires redis-server >= 6.2.0.
+// Not supported with the current appveyor/windows binary deployed.
+#[cfg(not(target_os = "windows"))]
+#[test]
+fn test_zrandmember() {
+    let ctx = TestContext::new();
+    let mut con = ctx.connection();
+
+    let setname = "myzrandset";
+    let () = con.zadd(setname, "one", 1).unwrap();
+
+    let result: String = con.zrandmember(setname, None).unwrap();
+    assert_eq!(result, "one".to_string());
+
+    let result: Vec<String> = con.zrandmember(setname, Some(1)).unwrap();
+    assert_eq!(result.len(), 1);
+    assert_eq!(result[0], "one".to_string());
+
+    let result: Vec<String> = con.zrandmember(setname, Some(2)).unwrap();
+    assert_eq!(result.len(), 1);
+    assert_eq!(result[0], "one".to_string());
+
+    let mut c = redis::cmd("ZADD");
+    c.arg(setname)
+        .arg(2)
+        .arg("two")
+        .arg(3)
+        .arg("three")
+        .arg(4)
+        .arg("four")
+        .arg(5)
+        .arg("five");
+
+    c.query::<()>(&mut con).unwrap();
+
+    let results: Vec<String> = con.zrandmember(setname, Some(5)).unwrap();
+    assert_eq!(results.len(), 5);
+
+    let results: Vec<String> = con.zrandmember(setname, Some(-5)).unwrap();
+    assert_eq!(results.len(), 5);
+
+    let results: Vec<String> = con.zrandmember_withscores(setname, 5).unwrap();
+    assert_eq!(results.len(), 10);
+
+    let results: Vec<String> = con.zrandmember_withscores(setname, -5).unwrap();
+    assert_eq!(results.len(), 10);
 }

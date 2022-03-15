@@ -6,7 +6,7 @@ use std::{
 use crate::types::{make_extension_error, ErrorKind, RedisError, RedisResult, Value};
 
 use combine::{
-    any, choice, eof,
+    any,
     error::StreamError,
     opaque,
     parser::{
@@ -15,7 +15,7 @@ use combine::{
         range::{recognize, take},
     },
     stream::{PointerOffset, RangeStream, StreamErrorFor},
-    Parser as _,
+    ParseError, Parser as _,
 };
 
 struct ResultExtend<T, E>(Result<T, E>);
@@ -59,8 +59,8 @@ where
     I: RangeStream<Token = u8, Range = &'a [u8]>,
     I::Error: combine::ParseError<u8, &'a [u8], I::Position>,
 {
-    opaque!(any_send_sync_partial_state(choice((
-        any().then_partial(move |&mut b| {
+    opaque!(any_send_sync_partial_state(any().then_partial(
+        move |&mut b| {
             let line = || {
                 recognize(take_until_bytes(&b"\r\n"[..]).with(take(2).map(|_| ()))).and_then(
                     |line: &[u8]| {
@@ -147,11 +147,8 @@ where
                 b'-' => error().map(Err),
                 b => combine::unexpected_any(combine::error::Token(b))
             )
-        }),
-        eof().map(|_| Err(RedisError::from(io::Error::from(
-            io::ErrorKind::UnexpectedEof,
-        ))))
-    ))))
+        }
+    )))
 }
 
 #[cfg(feature = "aio")]
@@ -167,23 +164,17 @@ mod aio_support {
         state: AnySendSyncPartialState,
     }
 
-    impl Encoder<Vec<u8>> for ValueCodec {
-        type Error = RedisError;
-        fn encode(&mut self, item: Vec<u8>, dst: &mut BytesMut) -> Result<(), Self::Error> {
-            dst.extend_from_slice(item.as_ref());
-            Ok(())
-        }
-    }
-
-    impl Decoder for ValueCodec {
-        type Item = Value;
-        type Error = RedisError;
-
-        fn decode(&mut self, bytes: &mut BytesMut) -> Result<Option<Self::Item>, Self::Error> {
+    impl ValueCodec {
+        fn decode_stream(
+            &mut self,
+            bytes: &mut BytesMut,
+            eof: bool,
+        ) -> RedisResult<Option<RedisResult<Value>>> {
             let (opt, removed_len) = {
                 let buffer = &bytes[..];
-                let mut stream = combine::easy::Stream(combine::stream::PartialStream(buffer));
-                match combine::stream::decode(value(), &mut stream, &mut self.state) {
+                let mut stream =
+                    combine::easy::Stream(combine::stream::MaybePartialStream(buffer, !eof));
+                match combine::stream::decode_tokio(value(), &mut stream, &mut self.state) {
                     Ok(x) => x,
                     Err(err) => {
                         let err = err
@@ -201,9 +192,30 @@ mod aio_support {
 
             bytes.advance(removed_len);
             match opt {
-                Some(result) => Ok(Some(result?)),
+                Some(result) => Ok(Some(result)),
                 None => Ok(None),
             }
+        }
+    }
+
+    impl Encoder<Vec<u8>> for ValueCodec {
+        type Error = RedisError;
+        fn encode(&mut self, item: Vec<u8>, dst: &mut BytesMut) -> Result<(), Self::Error> {
+            dst.extend_from_slice(item.as_ref());
+            Ok(())
+        }
+    }
+
+    impl Decoder for ValueCodec {
+        type Item = RedisResult<Value>;
+        type Error = RedisError;
+
+        fn decode(&mut self, bytes: &mut BytesMut) -> Result<Option<Self::Item>, Self::Error> {
+            self.decode_stream(bytes, false)
+        }
+
+        fn decode_eof(&mut self, bytes: &mut BytesMut) -> Result<Option<Self::Item>, Self::Error> {
+            self.decode_stream(bytes, true)
         }
     }
 
@@ -222,11 +234,15 @@ mod aio_support {
             Err(err) => Err(match err {
                 combine::stream::decoder::Error::Io { error, .. } => error.into(),
                 combine::stream::decoder::Error::Parse(err) => {
-                    let err = err
-                        .map_range(|range| format!("{:?}", range))
-                        .map_position(|pos| pos.translate_position(decoder.buffer()))
-                        .to_string();
-                    RedisError::from((ErrorKind::ResponseError, "parse error", err))
+                    if err.is_unexpected_end_of_input() {
+                        RedisError::from(io::Error::from(io::ErrorKind::UnexpectedEof))
+                    } else {
+                        let err = err
+                            .map_range(|range| format!("{:?}", range))
+                            .map_position(|pos| pos.translate_position(decoder.buffer()))
+                            .to_string();
+                        RedisError::from((ErrorKind::ResponseError, "parse error", err))
+                    }
                 }
             }),
             Ok(result) => result,
@@ -276,11 +292,15 @@ impl Parser {
             Err(err) => Err(match err {
                 combine::stream::decoder::Error::Io { error, .. } => error.into(),
                 combine::stream::decoder::Error::Parse(err) => {
-                    let err = err
-                        .map_range(|range| format!("{:?}", range))
-                        .map_position(|pos| pos.translate_position(decoder.buffer()))
-                        .to_string();
-                    RedisError::from((ErrorKind::ResponseError, "parse error", err))
+                    if err.is_unexpected_end_of_input() {
+                        RedisError::from(io::Error::from(io::ErrorKind::UnexpectedEof))
+                    } else {
+                        let err = err
+                            .map_range(|range| format!("{:?}", range))
+                            .map_position(|pos| pos.translate_position(decoder.buffer()))
+                            .to_string();
+                        RedisError::from((ErrorKind::ResponseError, "parse error", err))
+                    }
                 }
             }),
             Ok(result) => result,
@@ -295,4 +315,25 @@ impl Parser {
 pub fn parse_redis_value(bytes: &[u8]) -> RedisResult<Value> {
     let mut parser = Parser::new();
     parser.parse_value(bytes)
+}
+
+#[cfg(test)]
+mod tests {
+    #[cfg(feature = "aio")]
+    use super::*;
+
+    #[cfg(feature = "aio")]
+    #[test]
+    fn decode_eof_returns_none_at_eof() {
+        use tokio_util::codec::Decoder;
+        let mut codec = ValueCodec::default();
+
+        let mut bytes = bytes::BytesMut::from(&b"+GET 123\r\n"[..]);
+        assert_eq!(
+            codec.decode_eof(&mut bytes),
+            Ok(Some(Ok(parse_redis_value(b"+GET 123\r\n").unwrap())))
+        );
+        assert_eq!(codec.decode_eof(&mut bytes), Ok(None));
+        assert_eq!(codec.decode_eof(&mut bytes), Ok(None));
+    }
 }

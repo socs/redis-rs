@@ -190,6 +190,7 @@ fn test_cluster_pipeline_command_ordering() {
 }
 
 #[test]
+#[ignore] // Flaky
 fn test_cluster_pipeline_ordering_with_improper_command() {
     let cluster = TestClusterContext::new(3, 0);
     cluster.wait_for_cluster_up();
@@ -210,6 +211,8 @@ fn test_cluster_pipeline_ordering_with_improper_command() {
         }
     }
     pipe.query::<()>(&mut con).unwrap_err();
+
+    std::thread::sleep(std::time::Duration::from_secs(5));
 
     pipe.clear();
     for q in &queries {

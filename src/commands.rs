@@ -428,7 +428,7 @@ implement_commands! {
             "INCRBY"
         }).arg(key).arg(delta)
     }
-    
+
     /// Decrement the numeric value of a key by the given amount.
     fn decr<K: ToRedisArgs, V: ToRedisArgs>(key: K, delta: V) {
         cmd("DECRBY").arg(key).arg(delta)
@@ -545,6 +545,18 @@ implement_commands! {
     }
 
     // list operations
+    
+    /// Pop an element from a list, push it to another list
+    /// and return it; or block until one is available
+    fn blmove<K: ToRedisArgs>(srckey: K, dstkey: K, src_dir: Direction, dst_dir: Direction, timeout: usize) {
+        cmd("BLMOVE").arg(srckey).arg(dstkey).arg(src_dir).arg(dst_dir).arg(timeout)
+    }
+
+    /// Pops `count` elements from the first non-empty list key from the list of 
+    /// provided key names; or blocks until one is available.
+    fn blmpop<K: ToRedisArgs>(timeout: usize, numkeys: usize, key: K, dir: Direction, count: usize){
+        cmd("BLMPOP").arg(timeout).arg(numkeys).arg(key).arg(dir).arg("COUNT").arg(count)
+    }
 
     /// Remove and get the first element in a list, or block until one is available.
     fn blpop<K: ToRedisArgs>(key: K, timeout: usize) {
@@ -584,9 +596,22 @@ implement_commands! {
         cmd("LLEN").arg(key)
     }
 
-    /// Removes and returns the first element of the list stored at key.
-    fn lpop<K: ToRedisArgs>(key: K) {
-        cmd("LPOP").arg(key)
+    /// Pop an element a list, push it to another list and return it
+    fn lmove<K: ToRedisArgs>(srckey: K, dstkey: K, src_dir: Direction, dst_dir: Direction) {
+        cmd("LMOVE").arg(srckey).arg(dstkey).arg(src_dir).arg(dst_dir)
+    }
+
+    /// Pops `count` elements from the first non-empty list key from the list of 
+    /// provided key names.
+    fn lmpop<K: ToRedisArgs>( numkeys: usize, key: K, dir: Direction, count: usize) {
+        cmd("LMPOP").arg(numkeys).arg(key).arg(dir).arg("COUNT").arg(count)
+    }
+
+    /// Removes and returns the up to `count` first elements of the list stored at key.
+    ///
+    /// If `count` is not specified, then defaults to first element.
+    fn lpop<K: ToRedisArgs>(key: K, count: Option<core::num::NonZeroUsize>) {
+        cmd("LPOP").arg(key).arg(count)
     }
 
     /// Returns the index of the first matching value of the list stored at key.
@@ -627,9 +652,11 @@ implement_commands! {
         cmd("LSET").arg(key).arg(index).arg(value)
     }
 
-    /// Removes and returns the last element of the list stored at key.
-    fn rpop<K: ToRedisArgs>(key: K) {
-        cmd("RPOP").arg(key)
+    /// Removes and returns the up to `count` last elements of the list stored at key
+    ///
+    /// If `count` is not specified, then defaults to last element.
+    fn rpop<K: ToRedisArgs>(key: K, count: Option<core::num::NonZeroUsize>) {
+        cmd("RPOP").arg(key).arg(count)
     }
 
     /// Pop a value from a list, push it to another list and return it.
@@ -786,6 +813,16 @@ implement_commands! {
         cmd("ZPOPMIN").arg(key).arg(count)
     }
 
+    /// Return up to count random members in a sorted set (or 1 if `count == None`)
+    fn zrandmember<K: ToRedisArgs>(key: K, count: Option<isize>) {
+        cmd("ZRANDMEMBER").arg(key).arg(count)
+    }
+
+    /// Return up to count random members in a sorted set with scores
+    fn zrandmember_withscores<K: ToRedisArgs>(key: K, count: isize) {
+        cmd("ZRANDMEMBER").arg(key).arg(count).arg("WITHSCORES")
+    }
+
     /// Return a range of members in a sorted set, by index
     fn zrange<K: ToRedisArgs>(key: K, start: isize, stop: isize) {
         cmd("ZRANGE").arg(key).arg(start).arg(stop)
@@ -911,6 +948,11 @@ implement_commands! {
     /// Get the score associated with the given member in a sorted set.
     fn zscore<K: ToRedisArgs, M: ToRedisArgs>(key: K, member: M) {
         cmd("ZSCORE").arg(key).arg(member)
+    }
+
+    /// Get the scores associated with multiple members in a sorted set.
+    fn zscore_multiple<K: ToRedisArgs, M: ToRedisArgs>(key: K, members: &'a [M]) {
+        cmd("ZMSCORE").arg(key).arg(members)
     }
 
     /// Unions multiple sorted sets and store the resulting sorted set in
@@ -1833,7 +1875,7 @@ implement_commands! {
     /// let opts = StreamReadOptions::default()
     ///     .count(10);
     /// let results: RedisResult<StreamReadReply> =
-    ///     con.xread_options(&["k1"], &["0"], opts);
+    ///     con.xread_options(&["k1"], &["0"], &opts);
     ///
     /// // Read all undelivered messages for a given
     /// // consumer group. Be advised: the consumer group must already
@@ -1843,7 +1885,7 @@ implement_commands! {
     /// let opts = StreamReadOptions::default()
     ///     .group("group-1", "consumer-1");
     /// let results: RedisResult<StreamReadReply> =
-    ///     con.xread_options(&["k1"], &[">"], opts);
+    ///     con.xread_options(&["k1"], &[">"], &opts);
     /// ```
     ///
     /// ```text
@@ -1860,7 +1902,7 @@ implement_commands! {
     fn xread_options<K: ToRedisArgs, ID: ToRedisArgs>(
         keys: &'a [K],
         ids: &'a [ID],
-        options: streams::StreamReadOptions
+        options: &'a streams::StreamReadOptions
     ) {
         cmd(if options.read_only() {
             "XREAD"
@@ -2119,5 +2161,24 @@ impl ToRedisArgs for LposOptions {
 
     fn is_single_arg(&self) -> bool {
         false
+    }
+}
+
+/// Enum for the LEFT | RIGHT args used by some commands
+pub enum Direction {
+    Left,
+    Right,
+}
+
+impl ToRedisArgs for Direction {
+    fn write_redis_args<W>(&self, out: &mut W)
+    where
+        W: ?Sized + RedisWrite,
+    {
+        let s: &[u8] = match self {
+            Direction::Left => b"LEFT",
+            Direction::Right => b"RIGHT",
+        };
+        out.write_arg(s);
     }
 }

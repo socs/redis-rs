@@ -260,7 +260,7 @@ impl ClusterConnection {
                     return Err(RedisError::from((
                         ErrorKind::ResponseError,
                         "Slot refresh error.",
-                        "No slots allocated",
+                        "No slots allocated".into(),
                     )));
                 }
                 slots_data.sort_by_key(|s| s.start());

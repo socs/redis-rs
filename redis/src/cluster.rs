@@ -484,6 +484,10 @@ impl ClusterConnection {
                             // Sleep and retry.
                             let sleep_time = 2u64.pow(16 - retries.max(9)) * 10;
                             thread::sleep(Duration::from_millis(sleep_time));
+                            // Refresh slots incase of error: (error) CLUSTERDOWN Hash slot not served
+                            if kind == ErrorKind::ClusterDown && err.is_hash_slot_not_served() {
+                                self.refresh_slots()?;
+                            }
                             excludes.clear();
                             continue;
                         }

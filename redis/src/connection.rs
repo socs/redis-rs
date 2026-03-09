@@ -57,6 +57,54 @@ pub struct TlsConnParams {
 
 static DEFAULT_PORT: u16 = 6379;
 
+/// Wrapper struct for Url adding custom validations.
+///
+/// We rely on rust-url for url parsing but add extra checks for valid redis schemes.
+/// Additionaly allow for link-local ipv6 addresses that isn't supported by rust-url.
+/// https://url.spec.whatwg.org/#host-representation
+#[derive(Clone, Debug)]
+pub struct Url {
+    inner: url::Url,
+    zone_id: Option<String>,
+}
+
+impl Url {
+    pub fn parse(input: &str) -> Option<Url> {
+        let (url, zone_id) = match (input.find("[fe80::"), input.rfind('%'), input.rfind(']')) {
+            (Some(_), Some(start), Some(end)) if start < end => {
+                let mut url = String::from(input);
+                let zone_id = String::from(&input[start + 1..end]);
+                // Strip zone identifier as rust-url will fail to parse it.
+                url.replace_range(start..end, "");
+                (Cow::Owned(url), Some(zone_id))
+            }
+            _ => (Cow::Borrowed(input), None),
+        };
+
+        url::Url::parse(&url)
+            .ok()
+            .filter(|u| {
+                matches!(
+                    u.scheme(),
+                    "redis"
+                        | "rediss"
+                        | "valkey"
+                        | "valkeys"
+                        | "redis+unix"
+                        | "valkey+unix"
+                        | "unix"
+                )
+            })
+            .map(|u| Url { inner: u, zone_id })
+    }
+}
+
+impl fmt::Display for Url {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.inner.fmt(f)
+    }
+}
+
 /// Default library name to connect with
 const DEFAULT_CLIENT_SETINFO_LIB_NAME: &str = "redis-rs";
 /// Default library version to connect with
@@ -82,16 +130,8 @@ fn connect_tcp_timeout(
 /// as used by rust-url.
 ///
 /// This is necessary as the default parser does not understand how redis URLs function.
-pub fn parse_redis_url(input: &str) -> Option<url::Url> {
-    match url::Url::parse(input) {
-        Ok(result) => match result.scheme() {
-            "redis" | "rediss" | "valkey" | "valkeys" | "redis+unix" | "valkey+unix" | "unix" => {
-                Some(result)
-            }
-            _ => None,
-        },
-        Err(_) => None,
-    }
+pub fn parse_redis_url(input: &str) -> Option<Url> {
+    Url::parse(input)
 }
 
 /// TlsMode indicates use or do not use verification of certification.
@@ -515,7 +555,10 @@ pub(crate) fn is_wildcard_address(address: &str) -> bool {
     address == "0.0.0.0" || address == "::"
 }
 
-fn url_to_tcp_connection_info(url: url::Url) -> RedisResult<ConnectionInfo> {
+fn url_to_tcp_connection_info(
+    url: url::Url,
+    zone_id: Option<String>,
+) -> RedisResult<ConnectionInfo> {
     let host = match url.host() {
         Some(host) => {
             // Here we manually match host's enum arms and call their to_string().
@@ -532,7 +575,9 @@ fn url_to_tcp_connection_info(url: url::Url) -> RedisResult<ConnectionInfo> {
             let host_str = match host {
                 url::Host::Domain(path) => path.to_string(),
                 url::Host::Ipv4(v4) => v4.to_string(),
-                url::Host::Ipv6(v6) => v6.to_string(),
+                url::Host::Ipv6(v6) => {
+                    zone_id.map_or_else(|| v6.to_string(), |z| format!("{}%{}", v6, z))
+                }
             };
 
             if is_wildcard_address(&host_str) {
@@ -651,11 +696,13 @@ fn url_to_unix_connection_info(_: url::Url) -> RedisResult<ConnectionInfo> {
     ));
 }
 
-impl IntoConnectionInfo for url::Url {
+impl IntoConnectionInfo for Url {
     fn into_connection_info(self) -> RedisResult<ConnectionInfo> {
-        match self.scheme() {
-            "redis" | "rediss" | "valkey" | "valkeys" => url_to_tcp_connection_info(self),
-            "unix" | "redis+unix" | "valkey+unix" => url_to_unix_connection_info(self),
+        match self.inner.scheme() {
+            "redis" | "rediss" | "valkey" | "valkeys" => {
+                url_to_tcp_connection_info(self.inner, self.zone_id)
+            }
+            "unix" | "redis+unix" | "valkey+unix" => url_to_unix_connection_info(self.inner),
             _ => fail!((
                 ErrorKind::InvalidClientConfig,
                 "URL provided is not a redis URL"
@@ -2515,6 +2562,7 @@ mod tests {
         let cases = vec![
             ("redis://127.0.0.1", true),
             ("redis://[::1]", true),
+            ("redis://foo:bar@[fe80::123:4567:89ab:cdef%eth0]:1234", true),
             ("rediss://127.0.0.1", true),
             ("rediss://[::1]", true),
             ("valkey://127.0.0.1", true),
@@ -2541,7 +2589,7 @@ mod tests {
     fn test_url_to_tcp_connection_info() {
         let cases = vec![
             (
-                url::Url::parse("redis://127.0.0.1").unwrap(),
+                Url::parse("redis://127.0.0.1").unwrap(),
                 ConnectionInfo {
                     addr: ConnectionAddr::Tcp("127.0.0.1".to_string(), 6379),
                     redis: Default::default(),
@@ -2549,7 +2597,7 @@ mod tests {
                 },
             ),
             (
-                url::Url::parse("redis://[::1]").unwrap(),
+                Url::parse("redis://[::1]").unwrap(),
                 ConnectionInfo {
                     addr: ConnectionAddr::Tcp("::1".to_string(), 6379),
                     redis: Default::default(),
@@ -2557,7 +2605,7 @@ mod tests {
                 },
             ),
             (
-                url::Url::parse("redis://%25johndoe%25:%23%40%3C%3E%24@example.com/2").unwrap(),
+                Url::parse("redis://%25johndoe%25:%23%40%3C%3E%24@example.com/2").unwrap(),
                 ConnectionInfo {
                     addr: ConnectionAddr::Tcp("example.com".to_string(), 6379),
                     redis: RedisConnectionInfo {
@@ -2573,7 +2621,7 @@ mod tests {
                 },
             ),
             (
-                url::Url::parse("redis://127.0.0.1/?protocol=2").unwrap(),
+                Url::parse("redis://127.0.0.1/?protocol=2").unwrap(),
                 ConnectionInfo {
                     addr: ConnectionAddr::Tcp("127.0.0.1".to_string(), 6379),
                     redis: Default::default(),
@@ -2581,7 +2629,7 @@ mod tests {
                 },
             ),
             (
-                url::Url::parse("redis://127.0.0.1/?protocol=resp3").unwrap(),
+                Url::parse("redis://127.0.0.1/?protocol=resp3").unwrap(),
                 ConnectionInfo {
                     addr: ConnectionAddr::Tcp("127.0.0.1".to_string(), 6379),
                     redis: RedisConnectionInfo {
@@ -2596,9 +2644,22 @@ mod tests {
                     tcp_settings: TcpSettings::default(),
                 },
             ),
+            (
+                Url::parse("redis://foo:bar@[fe80::123:4567:89ab:cdef%eth0]:1234").unwrap(),
+                ConnectionInfo {
+                    addr: ConnectionAddr::Tcp("fe80::123:4567:89ab:cdef%eth0".to_string(), 1234),
+                    redis: RedisConnectionInfo {
+                        username: Some(ArcStr::from("foo")),
+                        password: Some(ArcStr::from("bar")),
+                        ..Default::default()
+                    },
+                    tcp_settings: todo!(),
+                },
+            ),
         ];
         for (url, expected) in cases.into_iter() {
-            let res = url_to_tcp_connection_info(url.clone()).unwrap();
+            let cloned = url.clone();
+            let res = url_to_tcp_connection_info(cloned.inner, cloned.zone_id).unwrap();
             assert_eq!(res.addr, expected.addr, "addr of {url} is not expected");
             assert_eq!(
                 res.redis.db, expected.redis.db,
@@ -2645,7 +2706,7 @@ mod tests {
             ),
         ];
         for (url, expected, detail) in cases.into_iter() {
-            let res = url_to_tcp_connection_info(url).unwrap_err();
+            let res = url_to_tcp_connection_info(url, None).unwrap_err();
             assert_eq!(res.kind(), crate::ErrorKind::InvalidClientConfig,);
             let desc = res.to_string();
             assert!(desc.contains(expected), "{desc}");

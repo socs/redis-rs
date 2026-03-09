@@ -459,7 +459,7 @@ where
     }
 
     // Query a node to discover slot-> master mappings.
-    fn refresh_slots(&self) -> RedisResult<()> {
+    pub fn refresh_slots(&self) -> RedisResult<()> {
         let mut slots = self.slots.borrow_mut();
         *slots = self.create_new_slots()?;
 

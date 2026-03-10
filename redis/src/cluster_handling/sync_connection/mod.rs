@@ -869,6 +869,8 @@ where
                             }
                         }
                         self.refresh_slots()?;
+                    } else if err.is_hash_slot_not_served() {
+                        self.refresh_slots()?;
                     }
 
                     if retries == self.cluster_params.retry_params.number_of_retries {

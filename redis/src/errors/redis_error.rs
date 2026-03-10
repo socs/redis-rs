@@ -267,6 +267,11 @@ impl RedisError {
         }
     }
 
+    /// Returns true if error was caused by: (error) CLUSTERDOWN Hash slot not served
+    pub fn is_hash_slot_not_served(&self) -> bool {
+        matches!(self.detail(), Some("Hash slot not served"))
+    }
+
     /// Returns the raw error code if available.
     pub fn code(&self) -> Option<&str> {
         match self.kind() {
